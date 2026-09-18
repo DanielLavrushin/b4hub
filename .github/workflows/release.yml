@@ -61,6 +61,25 @@ jobs:
           echo "describe=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Release notes
+        id: notes
+        env:
+          DESCRIBE: ${{ steps.source.outputs.describe }}
+          SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          NOTES=$(awk '/^## \[/{if (found++) exit} found {print}' b4/hub/CHANGELOG.md)
+          if ! printf '%s\n' "$NOTES" | head -n1 | grep -q "\[$VERSION\]"; then
+            echo "hub/CHANGELOG.md in b4 ref '$DESCRIBE' has no entry for $VERSION at the top" >&2
+            exit 1
+          fi
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo
+            echo "Built from b4 [\`$DESCRIBE\`](https://github.com/$B4_REPO/commit/$SHA). Images: \`lavrushin/b4hub:$VERSION\`, \`ghcr.io/daniellavrushin/b4hub:$VERSION\`."
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Setup PNPM
         uses: pnpm/action-setup@v6
         with:
@@ -99,25 +118,6 @@ jobs:
         run: |
           sha256sum *.tar.gz > SHA256SUMS
           ls -la
-
-      - name: Release notes
-        id: notes
-        env:
-          DESCRIBE: ${{ steps.source.outputs.describe }}
-          SHA: ${{ steps.source.outputs.sha }}
-        run: |
-          NOTES=$(awk '/^## \[/{if (found++) exit} found {print}' b4/hub/CHANGELOG.md)
-          if ! printf '%s\n' "$NOTES" | head -n1 | grep -q "\[$VERSION\]"; then
-            echo "hub/CHANGELOG.md in b4 has no entry for $VERSION at the top" >&2
-            exit 1
-          fi
-          {
-            echo "notes<<EOF"
-            echo "$NOTES"
-            echo
-            echo "Built from b4 [\`$DESCRIBE\`](https://github.com/$B4_REPO/commit/$SHA). Images: \`lavrushin/b4hub:$VERSION\`, \`ghcr.io/daniellavrushin/b4hub:$VERSION\`."
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
