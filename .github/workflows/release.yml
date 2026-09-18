@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Hub version (e.g. 1.0.0)"
+        required: true
+      ref:
+        description: "b4 branch, tag or commit to build from"
+        required: true
+        default: "main"
+      prerelease:
+        description: "Mark as pre-release?"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "Create as draft release?"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  VERSION: ${{ inputs.version }}
+  B4_REPO: DanielLavrushin/b4
+
+jobs:
+  release:
+    name: Build and release b4hub ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Check the version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like 1.2.3, got '$VERSION'" >&2; exit 1 ;;
+          esac
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v$VERSION is already released" >&2
+            exit 1
+          fi
+
+      - name: Checkout b4
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.B4_REPO }}
+          ref: ${{ inputs.ref }}
+          path: b4
+          fetch-depth: 0
+
+      - name: Describe the b4 source tree
+        id: source
+        working-directory: b4
+        run: |
+          echo "describe=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.2
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: "pnpm"
+          cache-dependency-path: b4/pnpm-lock.yaml
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: b4/hub/go.mod
+          cache-dependency-path: |
+            b4/hub/go.sum
+            b4/src/go.sum
+
+      - name: Install console dependencies
+        working-directory: b4
+        run: pnpm install --frozen-lockfile --filter b4hub-ui...
+
+      - name: Run hub tests
+        working-directory: b4/hub
+        run: go test ./...
+
+      - name: Build tarballs
+        working-directory: b4
+        run: make hub-linux-all HUB_VERSION="$VERSION"
+
+      - name: Generate checksums
+        working-directory: b4/out/assets
+        run: |
+          sha256sum *.tar.gz > SHA256SUMS
+          ls -la
+
+      - name: Release notes
+        id: notes
+        env:
+          DESCRIBE: ${{ steps.source.outputs.describe }}
+          SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          NOTES=$(awk '/^## \[/{if (found++) exit} found {print}' b4/hub/CHANGELOG.md)
+          if ! printf '%s\n' "$NOTES" | head -n1 | grep -q "\[$VERSION\]"; then
+            echo "hub/CHANGELOG.md in b4 has no entry for $VERSION at the top" >&2
+            exit 1
+          fi
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo
+            echo "Built from b4 [\`$DESCRIBE\`](https://github.com/$B4_REPO/commit/$SHA). Images: \`lavrushin/b4hub:$VERSION\`, \`ghcr.io/daniellavrushin/b4hub:$VERSION\`."
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: ${{ !inputs.draft }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        if: ${{ !inputs.draft }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Determine image tags
+        id: tags
+        env:
+          OWNER: ${{ github.repository_owner }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          OWNER_LOWER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          TAGS="lavrushin/b4hub:${VERSION},ghcr.io/${OWNER_LOWER}/b4hub:${VERSION}"
+          if [ "$PRERELEASE" != "true" ]; then
+            TAGS="${TAGS},lavrushin/b4hub:latest,ghcr.io/${OWNER_LOWER}/b4hub:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push images
+        uses: docker/build-push-action@v6
+        with:
+          context: b4
+          file: b4/hub/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ !inputs.draft }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            B4_SOURCE=${{ steps.source.outputs.describe }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          body: ${{ steps.notes.outputs.notes }}
+          files: |
+            b4/out/assets/b4hub-*.tar.gz
+            b4/out/assets/b4hub-*.tar.gz.sha256
+            b4/out/assets/SHA256SUMS
