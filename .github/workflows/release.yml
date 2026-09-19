@@ -172,16 +172,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Update the Docker Hub description
-        if: ${{ !inputs.draft && !inputs.prerelease }}
-        uses: peter-evans/dockerhub-description@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: lavrushin/b4hub
-          short-description: "b4 community hub: shared sets for b4 routers, or a mirror of hub.b4core.app"
-          readme-filepath: b4hub/deploy/docker/DOCKERHUB.md
-
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:
